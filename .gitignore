@@ -1,0 +1,21 @@
+﻿# Sensitive outputs
+registered_accounts.txt
+accounts.txt
+registered_accounts.csv
+ak.txt
+rk.txt
+codex_tokens/
+tokens/
+tokens_new/
+
+# Local secrets
+.env
+.env.*
+
+# Python cache
+__pycache__/
+*.pyc
+
+# System files
+.DS_Store
+Thumbs.db
