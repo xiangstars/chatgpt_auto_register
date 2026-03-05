@@ -41,7 +41,9 @@ class C:
     BCYAN   = "\033[1;36m"  # Bold Cyan
 
 
-DATA_DIR = os.path.join(".", "data")
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_PARENT_DIR = os.path.dirname(PROJECT_DIR)
+DATA_DIR = os.path.join(PROJECT_PARENT_DIR, "codexTokens")
 
 
 def _to_int_with_min(value: Any, fallback: int, minimum: int = 1) -> int:

@@ -17,11 +17,21 @@ import traceback
 import secrets
 import hashlib
 import base64
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, parse_qs, urlencode
 
 from curl_cffi import requests as curl_requests
+
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_PARENT_DIR = os.path.dirname(PROJECT_DIR)
+SHARED_CODEX_TOKENS_DIR = os.path.join(PROJECT_PARENT_DIR, "codexTokens")
+
+
+def _shared_file_path(path_value, default_name):
+    raw = str(path_value or "").strip()
+    file_name = os.path.basename(raw) if raw else default_name
+    return os.path.join(SHARED_CODEX_TOKENS_DIR, file_name)
+
 
 # ================= 加载配置 =================
 def _load_config():
@@ -86,15 +96,15 @@ DUCKMAIL_API_BASE = _CONFIG["duckmail_api_base"]
 DUCKMAIL_BEARER = _CONFIG["duckmail_bearer"]
 DEFAULT_TOTAL_ACCOUNTS = _CONFIG["total_accounts"]
 DEFAULT_PROXY = _CONFIG["proxy"]
-DEFAULT_OUTPUT_FILE = _CONFIG["output_file"]
+DEFAULT_OUTPUT_FILE = _shared_file_path(_CONFIG.get("output_file"), "registered_accounts.txt")
 ENABLE_OAUTH = _as_bool(_CONFIG.get("enable_oauth", True))
 OAUTH_REQUIRED = _as_bool(_CONFIG.get("oauth_required", True))
 OAUTH_ISSUER = _CONFIG["oauth_issuer"].rstrip("/")
 OAUTH_CLIENT_ID = _CONFIG["oauth_client_id"]
 OAUTH_REDIRECT_URI = _CONFIG["oauth_redirect_uri"]
-AK_FILE = _CONFIG["ak_file"]
-RK_FILE = _CONFIG["rk_file"]
-TOKEN_JSON_DIR = _CONFIG["token_json_dir"]
+AK_FILE = _shared_file_path(_CONFIG.get("ak_file"), "ak.txt")
+RK_FILE = _shared_file_path(_CONFIG.get("rk_file"), "rk.txt")
+TOKEN_JSON_DIR = SHARED_CODEX_TOKENS_DIR
 UPLOAD_API_URL = _CONFIG["upload_api_url"]
 UPLOAD_API_TOKEN = _CONFIG["upload_api_token"]
 
@@ -370,7 +380,24 @@ def _decode_jwt_payload(token: str):
         return {}
 
 
+def _ensure_account_data_dir():
+    os.makedirs(SHARED_CODEX_TOKENS_DIR, exist_ok=True)
+    return SHARED_CODEX_TOKENS_DIR
+
+
+def _get_token_dir():
+    return TOKEN_JSON_DIR
+
+
+def _ensure_token_dir():
+    _ensure_account_data_dir()
+    token_dir = _get_token_dir()
+    os.makedirs(token_dir, exist_ok=True)
+    return token_dir
+
+
 def _save_codex_tokens(email: str, tokens: dict):
+    _ensure_account_data_dir()
     access_token = tokens.get("access_token", "")
     refresh_token = tokens.get("refresh_token", "")
     id_token = tokens.get("id_token", "")
@@ -414,9 +441,7 @@ def _save_codex_tokens(email: str, tokens: dict):
         "refresh_token": refresh_token,
     }
 
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    token_dir = TOKEN_JSON_DIR if os.path.isabs(TOKEN_JSON_DIR) else os.path.join(base_dir, TOKEN_JSON_DIR)
-    os.makedirs(token_dir, exist_ok=True)
+    token_dir = _ensure_token_dir()
 
     token_path = os.path.join(token_dir, f"{email}.json")
     with _file_lock:
@@ -1764,7 +1789,13 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
         print("   或: set DUCKMAIL_BEARER=your_api_key_here (Windows)")
         return
 
+    output_file = _shared_file_path(output_file, "registered_accounts.txt")
+    storage_dir = _ensure_account_data_dir()
     actual_workers = min(max_workers, total_accounts)
+    token_dir = ""
+    if ENABLE_OAUTH:
+        token_dir = _ensure_token_dir()
+
     print(f"\n{'#'*60}")
     print(f"  ChatGPT 批量自动注册 (DuckMail 临时邮箱版)")
     print(f"  注册数量: {total_accounts} | 并发数: {actual_workers}")
@@ -1773,7 +1804,8 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
     if ENABLE_OAUTH:
         print(f"  OAuth Issuer: {OAUTH_ISSUER}")
         print(f"  OAuth Client: {OAUTH_CLIENT_ID}")
-        print(f"  Token输出: {TOKEN_JSON_DIR}/, {AK_FILE}, {RK_FILE}")
+        print(f"  Token输出: {token_dir}/, {AK_FILE}, {RK_FILE}")
+    print(f"  账号数据目录: {storage_dir}/")
     print(f"  输出文件: {output_file}")
     print(f"{'#'*60}\n")
 
@@ -1812,34 +1844,6 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
     if success_count > 0:
         print(f"  结果文件: {output_file}")
     print(f"{'#'*60}")
-
-def run_token_conversion():
-    """After registration, convert codex token JSON files into tokens format."""
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    source_dir = TOKEN_JSON_DIR if os.path.isabs(TOKEN_JSON_DIR) else os.path.join(base_dir, TOKEN_JSON_DIR)
-    target_dir = os.path.join(base_dir, "tokens")
-
-    print("\n[Convert] Running convert_codex_tokens ...")
-    if not os.path.isdir(source_dir):
-        print(f"[Convert] Skip: source folder not found: {source_dir}")
-        return
-
-    try:
-        os.makedirs(target_dir, exist_ok=True)
-        from convert_codex_tokens import convert_directory
-
-        stats = convert_directory(Path(source_dir), Path(target_dir), dry_run=False, quiet=False)
-        print(
-            "[Convert] Summary: "
-            f"created={stats['created']}, "
-            f"skipped_existing={stats['skipped_existing']}, "
-            f"skipped_source_duplicates={stats['skipped_source_duplicates']}, "
-            f"skipped_invalid={stats['skipped_invalid']}"
-        )
-    except Exception as e:
-        print(f"[Convert] Failed: {e}")
-        traceback.print_exc()
-
 
 def main():
     print("=" * 60)
@@ -1889,7 +1893,6 @@ def main():
 
     run_batch(total_accounts=total_accounts, output_file=DEFAULT_OUTPUT_FILE,
               max_workers=max_workers, proxy=proxy)
-    run_token_conversion()
 
 
 if __name__ == "__main__":
