@@ -47,7 +47,8 @@ def _load_config():
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     if os.path.exists(config_path):
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            # Use utf-8-sig to transparently handle UTF-8 BOM files.
+            with open(config_path, "r", encoding="utf-8-sig") as f:
                 file_config = json.load(f)
                 config.update(file_config)
         except Exception as e:
