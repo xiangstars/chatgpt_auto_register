@@ -24,13 +24,48 @@ from curl_cffi import requests as curl_requests
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_PARENT_DIR = os.path.dirname(PROJECT_DIR)
-SHARED_CODEX_TOKENS_DIR = os.path.join(PROJECT_PARENT_DIR, "codexTokens")
+
+def _detect_desktop_dir():
+    """自动识别 Windows/macOS 桌面路径，找不到则回退到 ~/Desktop。"""
+    home_dir = os.path.expanduser("~")
+    candidates = []
+
+    if os.name == "nt" or sys.platform.startswith("win"):
+        onedrive = os.environ.get("OneDrive") or os.environ.get("ONEDRIVE")
+        user_profile = os.environ.get("USERPROFILE")
+        if onedrive:
+            candidates.append(os.path.join(onedrive, "Desktop"))
+        if user_profile:
+            candidates.append(os.path.join(user_profile, "Desktop"))
+        if home_dir:
+            candidates.append(os.path.join(home_dir, "Desktop"))
+    else:
+        if home_dir:
+            candidates.append(os.path.join(home_dir, "Desktop"))
+
+    for path in candidates:
+        if path and os.path.isdir(path):
+            return path
+
+    fallback = candidates[0] if candidates else os.path.join(PROJECT_PARENT_DIR, "Desktop")
+    os.makedirs(fallback, exist_ok=True)
+    return fallback
+
+
+DESKTOP_DIR = _detect_desktop_dir()
+DESKTOP_CODEX_TOKENS_DIR = os.path.join(DESKTOP_DIR, "codexTokens")
+
+
+def _desktop_file_path(path_value, default_name):
+    raw = str(path_value or "").strip()
+    file_name = os.path.basename(raw) if raw else default_name
+    return os.path.join(DESKTOP_DIR, file_name)
 
 
 def _shared_file_path(path_value, default_name):
     raw = str(path_value or "").strip()
     file_name = os.path.basename(raw) if raw else default_name
-    return os.path.join(SHARED_CODEX_TOKENS_DIR, file_name)
+    return os.path.join(DESKTOP_CODEX_TOKENS_DIR, file_name)
 
 
 # ================= 加载配置 =================
@@ -96,7 +131,7 @@ DUCKMAIL_API_BASE = _CONFIG["duckmail_api_base"]
 DUCKMAIL_BEARER = _CONFIG["duckmail_bearer"]
 DEFAULT_TOTAL_ACCOUNTS = _CONFIG["total_accounts"]
 DEFAULT_PROXY = _CONFIG["proxy"]
-DEFAULT_OUTPUT_FILE = _shared_file_path(_CONFIG.get("output_file"), "registered_accounts.txt")
+DEFAULT_OUTPUT_FILE = _desktop_file_path(_CONFIG.get("output_file"), "registered_accounts.txt")
 ENABLE_OAUTH = _as_bool(_CONFIG.get("enable_oauth", True))
 OAUTH_REQUIRED = _as_bool(_CONFIG.get("oauth_required", True))
 OAUTH_ISSUER = _CONFIG["oauth_issuer"].rstrip("/")
@@ -104,7 +139,7 @@ OAUTH_CLIENT_ID = _CONFIG["oauth_client_id"]
 OAUTH_REDIRECT_URI = _CONFIG["oauth_redirect_uri"]
 AK_FILE = _shared_file_path(_CONFIG.get("ak_file"), "ak.txt")
 RK_FILE = _shared_file_path(_CONFIG.get("rk_file"), "rk.txt")
-TOKEN_JSON_DIR = SHARED_CODEX_TOKENS_DIR
+TOKEN_JSON_DIR = DESKTOP_CODEX_TOKENS_DIR
 UPLOAD_API_URL = _CONFIG["upload_api_url"]
 UPLOAD_API_TOKEN = _CONFIG["upload_api_token"]
 
@@ -380,9 +415,38 @@ def _decode_jwt_payload(token: str):
         return {}
 
 
+def _normalize_email(email: str):
+    return str(email or "").strip().lower()
+
+
+def _append_registered_account_unique(output_file, email, chatgpt_password, email_pwd, oauth_ok):
+    normalized_email = _normalize_email(email)
+    if not normalized_email:
+        return False
+
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+    line = f"{normalized_email}----{chatgpt_password}----{email_pwd}----oauth={'ok' if oauth_ok else 'fail'}\n"
+
+    with _file_lock:
+        existing_emails = set()
+        if os.path.exists(output_file):
+            with open(output_file, "r", encoding="utf-8") as f:
+                for raw_line in f:
+                    old_email = _normalize_email(raw_line.split("----", 1)[0])
+                    if old_email:
+                        existing_emails.add(old_email)
+
+        if normalized_email in existing_emails:
+            return False
+
+        with open(output_file, "a", encoding="utf-8") as out:
+            out.write(line)
+        return True
+
+
 def _ensure_account_data_dir():
-    os.makedirs(SHARED_CODEX_TOKENS_DIR, exist_ok=True)
-    return SHARED_CODEX_TOKENS_DIR
+    os.makedirs(TOKEN_JSON_DIR, exist_ok=True)
+    return TOKEN_JSON_DIR
 
 
 def _get_token_dir():
@@ -398,19 +462,10 @@ def _ensure_token_dir():
 
 def _save_codex_tokens(email: str, tokens: dict):
     _ensure_account_data_dir()
+    normalized_email = _normalize_email(email)
     access_token = tokens.get("access_token", "")
     refresh_token = tokens.get("refresh_token", "")
     id_token = tokens.get("id_token", "")
-
-    if access_token:
-        with _file_lock:
-            with open(AK_FILE, "a", encoding="utf-8") as f:
-                f.write(f"{access_token}\n")
-
-    if refresh_token:
-        with _file_lock:
-            with open(RK_FILE, "a", encoding="utf-8") as f:
-                f.write(f"{refresh_token}\n")
 
     if not access_token:
         return
@@ -432,7 +487,7 @@ def _save_codex_tokens(email: str, tokens: dict):
     now = datetime.now(tz=timezone(timedelta(hours=8)))
     token_data = {
         "type": "codex",
-        "email": email,
+        "email": normalized_email or email,
         "expired": expired_str,
         "id_token": id_token,
         "account_id": account_id,
@@ -443,7 +498,8 @@ def _save_codex_tokens(email: str, tokens: dict):
 
     token_dir = _ensure_token_dir()
 
-    token_path = os.path.join(token_dir, f"{email}.json")
+    file_email = normalized_email or _normalize_email(email) or f"account_{int(time.time())}"
+    token_path = os.path.join(token_dir, f"{file_email}.json")
     with _file_lock:
         with open(token_path, "w", encoding="utf-8") as f:
             json.dump(token_data, f, ensure_ascii=False)
@@ -1762,10 +1818,16 @@ def _register_one(idx, total, proxy, output_file):
                     raise Exception(f"{msg}（oauth_required=true）")
                 reg._print(f"[OAuth] {msg}（按配置继续）")
 
-        # 4. 线程安全写入结果
-        with _file_lock:
-            with open(output_file, "a", encoding="utf-8") as out:
-                out.write(f"{email}----{chatgpt_password}----{email_pwd}----oauth={'ok' if oauth_ok else 'fail'}\n")
+        # 4. 线程安全写入结果（按邮箱去重）
+        appended = _append_registered_account_unique(
+            output_file=output_file,
+            email=email,
+            chatgpt_password=chatgpt_password,
+            email_pwd=email_pwd,
+            oauth_ok=oauth_ok,
+        )
+        if not appended:
+            reg._print(f"[去重] 邮箱已存在，跳过写入 TXT: {_normalize_email(email)}")
 
         with _print_lock:
             print(f"\n[OK] [{tag}] {email} 注册成功!")
@@ -1789,7 +1851,7 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
         print("   或: set DUCKMAIL_BEARER=your_api_key_here (Windows)")
         return
 
-    output_file = _shared_file_path(output_file, "registered_accounts.txt")
+    output_file = _desktop_file_path(output_file, "registered_accounts.txt")
     storage_dir = _ensure_account_data_dir()
     actual_workers = min(max_workers, total_accounts)
     token_dir = ""
@@ -1804,7 +1866,7 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
     if ENABLE_OAUTH:
         print(f"  OAuth Issuer: {OAUTH_ISSUER}")
         print(f"  OAuth Client: {OAUTH_CLIENT_ID}")
-        print(f"  Token输出: {token_dir}/, {AK_FILE}, {RK_FILE}")
+        print(f"  Token输出目录(JSON): {token_dir}/")
     print(f"  账号数据目录: {storage_dir}/")
     print(f"  输出文件: {output_file}")
     print(f"{'#'*60}\n")
